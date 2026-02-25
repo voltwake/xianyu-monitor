@@ -319,6 +319,29 @@ async function scanTask(browser, db, task, limit, args = {}) {
         .forEach(btn => btn.click());
     }).catch(() => {});
     await page.keyboard.press('Escape').catch(() => {});
+    await sleep(500);
+    
+    // Click "新发布" to sort by newest
+    try {
+      const clicked = await page.evaluate(() => {
+        const els = document.querySelectorAll('div, span, a');
+        for (const el of els) {
+          if (el.textContent?.trim() === '新发布' && el.offsetParent !== null) {
+            el.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (clicked) {
+        console.log('   已切换为"新发布"排序');
+        await sleep(3000 + Math.random() * 1000);
+      } else {
+        console.log('   未找到"新发布"按钮');
+      }
+    } catch {
+      console.log('   未找到"新发布"按钮');
+    }
     
     // Wait for items to appear
     let retries = 3;
