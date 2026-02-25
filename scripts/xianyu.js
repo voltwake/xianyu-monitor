@@ -243,112 +243,138 @@ async function cmdScan(args) {
 }
 
 async function scanTask(browser, db, task, limit, args = {}) {
-  const page = await browser.newPage();
   const newItems = [];
   
   try {
-    await page.setViewport({ width: 1280, height: 900 });
-    
-    // Anti-detection
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en-US', 'en'] });
-      window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {} };
-    });
-    
-    // Step 1: Visit homepage first (anti-detection)
-    await page.goto('https://www.goofish.com/', { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await sleep(1500 + Math.random() * 1500);
-    
-    // Step 2: Navigate to search
-    const searchUrl = `https://www.goofish.com/search?q=${encodeURIComponent(task.keyword)}`;
-    
-    // Set up API response interception - collect ALL search responses
-    const searchResponses = [];
-    const searchErrors = [];
-    page.on('response', async (resp) => {
-      if (resp.url().includes(SEARCH_API_PATTERN)) {
-        try {
-          const json = await resp.json();
-          const ret = JSON.stringify(json?.ret || []);
-          if (ret.includes('RGV587') || ret.includes('FAIL_SYS_USER_VALIDATE') || ret.includes('SM::')) {
-            searchErrors.push(ret);
-          }
-          if (json?.data?.resultList?.length > 0) {
-            searchResponses.push(json);
-          }
-        } catch {}
+    // Get or create a goofish tab
+    const pages = await browser.pages();
+    let page = pages.find(p => p.url().includes('goofish.com'));
+    if (!page) {
+      // No existing goofish tab — use AppleScript to navigate (page.goto gets blocked by baxia)
+      const { execSync } = require('child_process');
+      // Use whichever tab is available, or the first one
+      page = pages.find(p => !p.url().startsWith('chrome://')) || pages[0];
+      if (!page) page = await browser.newPage();
+      console.log('   首次访问闲鱼，使用地址栏导航...');
+      execSync(`osascript -e 'tell application "Google Chrome" to activate'`);
+      await sleep(300);
+      execSync(`osascript -e 'tell application "System Events" to keystroke "l" using command down'`);
+      await sleep(200);
+      execSync(`osascript -e 'tell application "System Events" to keystroke "goofish.com"'`);
+      await sleep(200);
+      execSync(`osascript -e 'tell application "System Events" to key code 36'`); // Enter
+      await sleep(6000);
+      // Re-find the page after navigation
+      const newPages = await browser.pages();
+      page = newPages.find(p => p.url().includes('goofish.com'));
+      if (!page) {
+        console.log('   ❌ 无法打开闲鱼');
+        return newItems;
       }
-    });
-    
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await sleep(3000);
-    
-    // Close login popup if it appears
-    try {
-      const closeBtn = await page.$('div[class*="closeIconBg"], button[class*="close"], .bax-close, [class*="modal"] [class*="close"]');
-      if (closeBtn) {
-        await closeBtn.click();
-        console.log('   关闭了登录弹窗');
-        await sleep(1000);
-      }
-    } catch {}
-    
-    // Also try pressing Escape to dismiss any popup
-    await page.keyboard.press('Escape').catch(() => {});
-    await sleep(2000);
-    
-    // Close login popup if visible
-    try {
-      const closeBtn2 = await page.$('div[class*="closeIconBg"]');
-      if (closeBtn2) { await closeBtn2.click(); await sleep(1000); }
-    } catch {}
-    
-    // Click "新发布" to sort by newest
-    try {
-      await page.click('text=新发布');
-      console.log('   已切换为"新发布"排序');
-      await sleep(3000);
-    } catch {
-      console.log('   未找到"新发布"按钮，使用默认排序');
-    }
-    
-    // If no results yet, try scrolling or re-searching
-    if (searchResponses.length === 0) {
-      await page.evaluate(() => window.scrollBy(0, 300));
-      await sleep(3000);
-    }
-    
-    if (searchResponses.length === 0) {
-      console.log('   首次搜索无结果，尝试重新搜索...');
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await sleep(5000);
+      // Close login popup and wait for search input to be ready
+      await page.evaluate(() => {
+        document.querySelectorAll('[class*="closeIcon"], [class*="close-btn"], [class*="dialog"] [class*="close"]')
+          .forEach(btn => btn.click());
+      }).catch(() => {});
       await page.keyboard.press('Escape').catch(() => {});
       await sleep(1000);
-      try { await page.click('text=新发布'); await sleep(3000); } catch {}
     }
     
-    // Wait a bit more for any pending responses
-    await sleep(2000);
+    // Close login popups via DOM click + Escape
+    await page.evaluate(() => {
+      document.querySelectorAll('[class*="closeIcon"], [class*="close-btn"], [class*="dialog"] [class*="close"]')
+        .forEach(btn => btn.click());
+    }).catch(() => {});
+    await page.keyboard.press('Escape').catch(() => {});
+    await sleep(500);
     
-    const apiData = searchResponses.length > 0 ? searchResponses[searchResponses.length - 1] : null;
-    if (!apiData) {
-      // Check if we got an auth error in any response
-      if (searchErrors.length > 0) {
-        throw new Error('COOKIE_EXPIRED: ' + searchErrors[0]);
-      }
-      console.log('   未获取到搜索数据（可能需要重新登录）');
+    // KEY INSIGHT: page.goto() gets blocked by baxia, but typing in the search box works!
+    // Use CDP Input events (page.click/type/press) to search via the on-page search box
+    // Wait for search input to appear (may take time on first load)
+    try {
+      await page.waitForSelector('input[class*="search-input"]', { timeout: 10000 });
+    } catch {
+      console.log('   等待搜索框超时，尝试关闭弹窗...');
+      await page.evaluate(() => {
+        document.querySelectorAll('[class*="closeIcon"], [class*="close-btn"], [class*="dialog"] [class*="close"]')
+          .forEach(btn => btn.click());
+      }).catch(() => {});
+      await page.keyboard.press('Escape').catch(() => {});
+      await sleep(2000);
+    }
+    await page.click('input[class*="search-input"]');
+    await page.click('input[class*="search-input"]', { clickCount: 3 }); // select all existing text
+    await sleep(200);
+    await page.keyboard.type(task.keyword, { delay: 50 + Math.random() * 80 });
+    await sleep(300 + Math.random() * 300);
+    await page.keyboard.press('Enter');
+    console.log('   使用搜索框输入关键词');
+    
+    // Wait for results to load
+    await sleep(5000 + Math.random() * 2000);
+    
+    // Close popup again (goofish shows login popup on every page change)
+    await page.evaluate(() => {
+      document.querySelectorAll('[class*="closeIcon"], [class*="close-btn"], [class*="dialog"] [class*="close"]')
+        .forEach(btn => btn.click());
+    }).catch(() => {});
+    await page.keyboard.press('Escape').catch(() => {});
+    
+    // Wait for items to appear
+    let retries = 3;
+    let domItems = [];
+    while (retries-- > 0) {
+      domItems = await page.evaluate(() => {
+        const results = [];
+        const cards = document.querySelectorAll('a[class*="feeds-item-wrap"]');
+        for (const card of cards) {
+          const href = card.href || '';
+          const idMatch = href.match(/id=(\d+)/);
+          if (!idMatch) continue;
+          const id = idMatch[1];
+          const text = card.innerText || '';
+          const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+          
+          // Title: longest meaningful line
+          let title = '';
+          for (const line of lines) {
+            if (line.length > 10 && !line.match(/^[¥￥\d]/) && !line.match(/^\d+[小时天分钟]+/)) {
+              title = line; break;
+            }
+          }
+          if (!title) title = lines[0] || '';
+          
+          const priceMatch = text.match(/[¥￥]\s*([\d,.]+)/);
+          const price = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : 0;
+          
+          const timeMatch = text.match(/(\d+[小时天分钟]+前发布)/);
+          const publishTime = timeMatch ? timeMatch[0] : '';
+          
+          const areaPatterns = text.match(/([\u4e00-\u9fa5]{2,}[市省区县])/g);
+          const area = areaPatterns ? areaPatterns[0] : '';
+          
+          const wantMatch = text.match(/(\d+)人想要/);
+          const wantCount = wantMatch ? parseInt(wantMatch[1]) : 0;
+          
+          const img = card.querySelector('img[src*="alicdn"], img[src*="goofish"]');
+          const imageUrl = img ? img.src : '';
+          
+          results.push({ id, title, price, area, publishTime, wantCount, imageUrl });
+        }
+        return results;
+      });
+      
+      if (domItems.length > 0) break;
+      console.log('   等待页面加载...');
+      await sleep(3000);
+    }
+    
+    if (domItems.length === 0) {
+      console.log('   未获取到搜索数据');
       return newItems;
     }
     
-    // Parse results
-    const resultList = apiData?.data?.resultList || [];
-    if (!resultList.length) {
-      console.log('   搜索结果为空');
-      return newItems;
-    }
-    
-    console.log(`   获取到 ${resultList.length} 条搜索结果，开始过滤...`);
+    console.log(`   获取到 ${domItems.length} 条搜索结果，开始过滤...`);
     
     const filterOut = task.filter_out ? task.filter_out.split(',').map(s => s.trim().toLowerCase()) : [];
     const mustInclude = task.must_include ? task.must_include.split(',').map(s => s.trim().toLowerCase()) : [];
@@ -359,56 +385,25 @@ async function scanTask(browser, db, task, limit, args = {}) {
     `);
     
     let count = 0;
-    for (const item of resultList) {
+    for (const item of domItems) {
       if (count >= limit) break;
       
-      const main = item?.data?.item?.main;
-      if (!main) continue;
-      
-      const exContent = main.exContent || {};
-      const clickArgs = main.clickParam?.args || {};
-      
-      const itemId = exContent.itemId || clickArgs.itemId;
+      const { id: itemId, title, price, area, publishTime, wantCount, imageUrl } = item;
       if (!itemId) continue;
       
-      const title = exContent.title || '未知标题';
       const titleLower = title.toLowerCase();
-      
-      // Price parsing
-      const priceParts = exContent.price || [];
-      let priceStr = '';
-      if (Array.isArray(priceParts)) {
-        priceStr = priceParts.map(p => (typeof p === 'object' ? p.text || '' : '')).join('').replace('当前价', '').trim();
-      }
-      let price = parseFloat(priceStr.replace(/[¥￥,]/g, ''));
-      if (priceStr.includes('万')) price = parseFloat(priceStr.replace(/[¥￥万,]/g, '')) * 10000;
-      if (isNaN(price)) price = 0;
-      
-      const area = exContent.area || '未知';
-      const seller = exContent.userNickName || '匿名';
-      const rawLink = main.targetUrl || '';
-      const link = rawLink.replace('fleamarket://', 'https://www.goofish.com/');
-      const pubTs = clickArgs.publishTime;
-      const publishTime = pubTs && /^\d+$/.test(pubTs) 
-        ? new Date(parseInt(pubTs)).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-        : '未知';
-      const wantCount = parseInt(clickArgs.wantNum) || 0;
-      const originalPrice = exContent.oriPrice || '';
-      const imageUrl = exContent.picUrl || '';
-      
-      // Tags
-      const tags = [];
-      if (clickArgs.tag === 'freeship') tags.push('包邮');
-      const r1Tags = exContent.fishTags?.r1?.tagList || [];
-      for (const t of r1Tags) {
-        if (t?.data?.content?.includes('验货宝')) tags.push('验货宝');
-      }
+      const link = `https://www.goofish.com/item?id=${itemId}`;
       
       // ---- Filters ----
-      // Time filter (--hours)
-      if (args.hours && pubTs && /^\d+$/.test(pubTs)) {
-        const pubDate = new Date(parseInt(pubTs));
-        const hoursAgo = (Date.now() - pubDate.getTime()) / (1000 * 60 * 60);
+      // Time filter (--hours) — parse relative time like "16小时前发布"
+      if (args.hours && publishTime) {
+        const hMatch = publishTime.match(/(\d+)小时/);
+        const dMatch = publishTime.match(/(\d+)天/);
+        const mMatch = publishTime.match(/(\d+)分钟/);
+        let hoursAgo = 0;
+        if (hMatch) hoursAgo = parseInt(hMatch[1]);
+        else if (dMatch) hoursAgo = parseInt(dMatch[1]) * 24;
+        else if (mMatch) hoursAgo = parseInt(mMatch[1]) / 60;
         if (hoursAgo > args.hours) continue;
       }
       
@@ -416,7 +411,7 @@ async function scanTask(browser, db, task, limit, args = {}) {
       if (task.max_price && price > task.max_price) continue;
       if (task.min_price && price < task.min_price) continue;
       
-      // Region filter: title or area must contain region keyword
+      // Region filter
       if (task.region) {
         const regionWords = task.region.split(',').map(s => s.trim().toLowerCase());
         const textToCheck = (title + ' ' + area).toLowerCase();
@@ -426,7 +421,7 @@ async function scanTask(browser, db, task, limit, args = {}) {
       // Text filter: exclude
       if (filterOut.length && filterOut.some(f => titleLower.includes(f))) continue;
       
-      // Text filter: must include (any match)
+      // Text filter: must include
       if (mustInclude.length && !mustInclude.some(f => titleLower.includes(f))) continue;
       
       // Dedup check
@@ -435,21 +430,21 @@ async function scanTask(browser, db, task, limit, args = {}) {
       
       // Insert
       insertStmt.run(
-        String(itemId), task.id, title, price, area, seller, link,
-        publishTime, wantCount, JSON.stringify(tags), originalPrice, imageUrl
+        String(itemId), task.id, title, price, area, '未知', link,
+        publishTime, wantCount, '[]', '', imageUrl
       );
       
       const newItem = {
         id: itemId, taskId: task.id, taskKeyword: task.keyword,
-        title, price, area, seller, link, publishTime, wantCount, 
-        tags, originalPrice, imageUrl
+        title, price, area, seller: '未知', link, publishTime, wantCount,
+        tags: [], originalPrice: '', imageUrl
       };
       newItems.push(newItem);
       count++;
     }
     
-  } finally {
-    await page.close().catch(() => {});
+  } catch (err) {
+    console.log(`   ❌ 扫描失败: ${err.message}`);
   }
   
   return newItems;

@@ -21,7 +21,6 @@ case "${1:-status}" in
       --disable-background-timer-throttling \
       --disable-backgrounding-occluded-windows \
       --disable-renderer-backgrounding \
-      --headless=new \
       > /dev/null 2>&1 &
     sleep 2
     if curl -s "http://127.0.0.1:$PORT/json/version" > /dev/null 2>&1; then
