@@ -321,26 +321,47 @@ async function scanTask(browser, db, task, limit, args = {}) {
     await page.keyboard.press('Escape').catch(() => {});
     await sleep(500);
     
-    // Click "新发布" to sort by newest
+    // Click "新发布" to sort by newest — use page.click (CDP Input event) not JS el.click()
     try {
-      const clicked = await page.evaluate(() => {
+      // Find the "新发布" button
+      const foundNew = await page.evaluate(() => {
         const els = document.querySelectorAll('div, span, a');
         for (const el of els) {
           if (el.textContent?.trim() === '新发布' && el.offsetParent !== null) {
-            el.click();
+            el.setAttribute('data-xianyu-sort', 'new');
             return true;
           }
         }
         return false;
       });
-      if (clicked) {
-        console.log('   已切换为"新发布"排序');
-        await sleep(3000 + Math.random() * 1000);
+      if (foundNew) {
+        await page.click('[data-xianyu-sort="new"]');
+        await sleep(1000);
+        
+        // Now click "最新" from the dropdown menu
+        const foundLatest = await page.evaluate(() => {
+          const els = document.querySelectorAll('div, span, a, li');
+          for (const el of els) {
+            if (el.textContent?.trim() === '最新' && el.offsetParent !== null) {
+              el.setAttribute('data-xianyu-sort', 'latest');
+              return true;
+            }
+          }
+          return false;
+        });
+        
+        if (foundLatest) {
+          await page.click('[data-xianyu-sort="latest"]');
+          console.log('   已切换为"新发布 -> 最新"排序');
+          await sleep(3000 + Math.random() * 1000);
+        } else {
+          console.log('   点击了"新发布"，但未找到"最新"选项');
+        }
       } else {
         console.log('   未找到"新发布"按钮');
       }
-    } catch {
-      console.log('   未找到"新发布"按钮');
+    } catch (e) {
+      console.log('   切换排序失败:', e.message);
     }
     
     // Wait for items to appear
