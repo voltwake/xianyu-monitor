@@ -1,0 +1,11 @@
+{
+  "name": "xianyu-monitor",
+  "version": "1.0.0",
+  "description": "闲鱼商品监控 OpenClaw Skill — 自动搜索、去重、推送到 Discord/Telegram",
+  "keywords": ["openclaw", "skill", "xianyu", "goofish", "monitor", "闲鱼"],
+  "license": "MIT",
+  "dependencies": {
+    "puppeteer-core": "^24.0.0",
+    "better-sqlite3": "^11.0.0"
+  }
+}
